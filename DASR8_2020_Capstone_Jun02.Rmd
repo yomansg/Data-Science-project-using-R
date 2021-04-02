@@ -1,0 +1,856 @@
+---
+title: "Factors Influencing the View- Completion Rates of Streamed Shows in Asian Countries"
+author: "Goh Zhang Hao; Yeo Theng Hee (Yoman)"
+date: "02-June-2020"
+output:
+  html_document:
+    theme: flatly
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Problem Statement
+
+There are a multitude of reasons explaining why someone finish or did not finish watching an online-streamed show (i.e., movies or TVs). For example, incidental reasons such as having a good (vs a poor) Wi-Fi and/or having plenty (vs the lack) of time. It is unclear that whether such reasons are entirely incidental. In our Capstone Project, we seek to explore possible inherent factors (at the individual-level) that can possibly influence viewers' view- completion rates of the shows they watched. Specifically, we seek to answer the following question:
+
+**Can viewers' demographic profile, psychographic patterns, and individual show-watching patterns influence    view-completion rates?**
+
+
+
+For our data science project, we activated the following packages, using the `Tidyverse` approach.
+
+```{r}
+library("tidyverse")
+library("broom")
+library("modelr")
+```
+
+## Import
+
+Then, we imported our csv datasets.
+
+```{r}
+assets <- read_csv("assets.csv")
+demographics <- read_csv("demographics.csv")
+plays <- read_csv("plays.csv")
+psychographics <- read_csv("psychographics.csv")
+users <- read_csv("users.csv")
+
+```
+
+
+The `users` dataset is most straight-forward, where we first Classify the users' countries into geographic regions. Bulk of the users are in East Asia & Pacific.
+
+```{r}
+library(countrycode)
+
+
+users <- users %>% 
+  mutate(region = countrycode(country_code, origin = "iso2c", destination = "region"))
+
+users %>% group_by(region) %>%   # show distribution of users
+  summarise(n = n(), percent = n/nrow(users)*100) %>% 
+  arrange(desc(n)) 
+```
+
+
+We then caught a glimpse of the other  datasets (`demographics`, `assets`, `psychographics`), and found them to require a fair bit of cleaning up.
+
+```{r}
+glimpse(demographics); glimpse(assets); glimpse(psychographics)
+```
+
+## Tidy & Transform
+
+The first thing we found in  our `demographics` dataset was the existence of duplicates in "Income" variable.
+
+```{r}
+demographics_dup_inc <- demographics %>%    # Duplicates found in "Income"
+  filter(level_2 == "Income") %>% 
+  group_by(user_id) %>% 
+  summarise(n = n()) %>% 
+  filter(n > 1) 
+
+demographics_clean <- demographics %>%   # TIDY up demographics
+  mutate(platform2 = ifelse(platform == "android", "android", "non-android")) %>%  # Recoding "platform"
+  filter(!demographics$user_id %in% demographics_dup_inc$user_id) %>%       # Remove cases with duplication
+  select(-confidence_score, -level_1, -platform) %>%    # Remove variables not in use
+  spread(level_2, level_3) %>% 
+  drop_na() 
+
+demographics_clean_wide_ctry <- demographics_clean %>%  inner_join(users, by = "user_id")
+
+ ## DATA A: Merged dataset for demographics and users:
+glimpse(demographics_clean_wide_ctry)
+```
+
+Following that, we performed a quick check on the `assets` and `plays` datasets, and once convinced there are no duplicate data in there, we joined these two datasets by *asset_id* to create a new dataset (`assetplay`). In the process, we filtered out: (1) cases with zero viewing minutes- Our focus here is on those who had, at least, watch it for a minute; and (2) watched more than 100%- this does not make sense.
+
+```{r}
+assets %>%  group_by(asset_id) %>% summarise(n = n()) %>%  filter(n > 1)  # So no duplicates in assets
+plays %>%  group_by(user_id, asset_id) %>% summarise(n = n()) %>% filter(n > 1)  # So no duplicates in plays
+
+
+assetplay <- plays %>% 
+  filter(minutes_viewed > 0) %>%   # removing cases which has zero viewing minutes. Our focus here is on those who had, at least, watch it for a minute.
+  inner_join(assets, by = "asset_id") %>% 
+  mutate(viewcompletion = (minutes_viewed/ running_minutes) * 100) %>% 
+  filter(viewcompletion <= 100) %>%   # Discard those above 100% watched
+  select(user_id, asset_id, show_type, genre, source_language, viewcompletion) %>% # now dropping running minutes & minutes viewed variables after we have computed view-completion rate
+  drop_na() 
+
+max(assetplay$viewcompletion); min(assetplay$viewcompletion)
+
+```
+
+We further reduced the number of categories in  *source_language* to three, and the number of  *genre*  to six. Next, we performed three calculations: 
+
+1.  create watcher-profile of users;
+2.  count the number of movies/TVs watched within each genre type; 
+3.  count the number of movies/TVs watched within each language type
+
+Finally, we calculate the mean view-completion rate of each user.
+
+
+```{r}
+# Reduce the number of categories for "source language" 
+Others_language <- c("Afrikaans", "Akan", " Arabic", "Avaric", "Kanuri", "Swahili",
+                     "Tajik")
+
+asian_language <- c("Bengali", "Burmese", "Central Khmer", "Chinese", "Hindi",
+                    "Indonesian", "Japanese", "Kazakh", "Korean", "Malay",
+                    "Nepali", "Sinhala; Sinhalese", "Tagalog", "Tamil", "Thai",
+                    "Turkish", "Urdu", "Vietnamese", "Arabic")
+
+european_language <- c("Catalan; Valencian", "Danish", "Dutch; Flemish", "English",
+                       "Esperanto", "French", "German", "Hungarian", "Italian", 
+                       "Macedonian", "Norwegian", "Portuguese", "Russian", "Spanish; Castilian",
+                       "Swedish")
+
+assetplay <- assetplay %>% 
+  mutate(source_language_g = ifelse(source_language %in% asian_language, "Asian_Language",
+                                    ifelse(source_language %in% european_language,"European_Language","Others_lang")))
+
+
+# Reduce the number of categories for "genre"
+# To find out the top genre: 
+assetplay %>% group_by(genre) %>% summarise(n = n(), percent = n/nrow(assetplay)* 100) %>%  arrange(desc(n))
+
+# Top 6 categories of genres here ...
+top6 <- c("Action and Adventure", "Drama", "Kids", "Comedy", "Romance", "Horror")
+
+
+# Filtering only the top 6 genres. All the rest of the genres outside the top 6 will be classified as "Others". A total of 7 categories will be created. 
+assetplay <- assetplay %>% 
+  mutate (genre7 = ifelse(!genre %in% top6, "Others_genre", genre)) %>% 
+  arrange(user_id, asset_id) %>% 
+  select(user_id, asset_id, show_type, source_language_g, genre7, viewcompletion)  
+
+
+# Creating watcher-profile of users:
+assetplay_watchertype <- assetplay %>% 
+  group_by(user_id, show_type) %>% 
+  summarise(showtypecount = n()) %>% 
+  spread(show_type, showtypecount)
+assetplay_watchertype[is.na(assetplay_watchertype)] <- 0
+assetplay_watchertype <- assetplay_watchertype %>% 
+  mutate(total_shows = Movies+ TV,
+         show_type_behaviour = ifelse(Movies/ total_shows >= 0.7, "Movie_watcher", 
+                                      ifelse(Movies/ total_shows > 0.3, "Movie_TV_watcher", 
+                                             "TV_watcher"))) 
+
+
+# Counting the number of movies/TVs watched within each genre type
+assetplay_genre <- assetplay %>% 
+  group_by(user_id, genre7) %>% 
+  summarise(genrecount = n()) 
+  
+assetplay_genre <- assetplay_genre %>% 
+  spread(genre7, genrecount) %>% 
+  inner_join(assetplay_genre %>% group_by(user_id) %>% 
+                         summarise(genre_width = n()),
+                                 by = "user_id")
+
+assetplay_genre [is.na(assetplay_genre)] <- 0 # Assigning a count of "zero" for users who have not watched a particular genre
+
+
+# Counting the number of movies/TVs watched within each language type
+assetplay_language <- assetplay %>% 
+  group_by(user_id, source_language_g) %>% 
+  summarise(languagecount = n()) 
+
+
+assetplay_language <- assetplay_language %>% 
+  spread(source_language_g, languagecount) %>% 
+  inner_join(assetplay_language %>% group_by(user_id) %>% 
+                summarise(lang_width = n()), by = "user_id")
+
+assetplay_language [is.na(assetplay_language)] <- 0 # Assigning a count of "zero" for users who have not watched a movie/TV in a particular language.
+
+
+# Calculating the mean viewcompletion rate of each user
+assetplay_avgviewcompletion <- assetplay %>% 
+  select(user_id, viewcompletion) %>%   
+  group_by(user_id) %>% 
+  summarise(viewcompletion = mean(viewcompletion))
+
+
+# Merge assetplay sub-datasets together
+assetplay_merged <- assetplay_watchertype %>% 
+  inner_join(assetplay_genre, by = "user_id") %>% 
+  inner_join(assetplay_language, by = "user_id") %>% 
+  inner_join(assetplay_avgviewcompletion, by = "user_id") %>% 
+  rename(Action_Adventure = `Action and Adventure`) %>% 
+  rename(viewcompletion_mean = viewcompletion)
+
+## DATA B: Merged dataset for plays and assets:
+glimpse(assetplay_merged)
+```
+
+Tidying up the  `psychographics` dataset consumed a good amount of effort in terms of untangling the data, and performing various data manipulation tasks to figure out the following:
+
+1.  the genre width and language widths of the Movie Fans;
+2.  the genre width and language widths of the TV Fans;
+3.  what kind of iflix viewing behaviour (casual/ addict/ player);
+4.  type of mobile enthusiast (Downloaders/ High data users/ Downloaders and High Data Users);
+5.  type of traveller (Local Commuters/ International Travellers/ Local Commuters and International Travellers)
+
+
+
+```{r}
+psychographics_recode <- psychographics %>% 
+  filter(!level_2 %in% c("Sports Fan", "Social Media Fans", "Music Lovers", "News Junkies & Avid Readers")) %>%  
+  mutate(level_3 = trimws(str_replace(level_3, "Movies Fans", ""))) %>% 
+  mutate(level_3 = trimws(str_replace(level_3, "TV Fans", "")))
+
+
+# genre Movie Fans
+psychographics_mv_gen <- psychographics_recode %>% 
+  filter(level_2 == "Movies Lovers") %>% 
+  filter(!level_3 %in% c(asian_language, european_language, Others_language)) %>%   
+  group_by(user_id) %>% 
+  summarise(MVFgenre_width = n()) 
+
+# language Movie Fans
+psychographics_mv_lang <- psychographics_recode %>% 
+    filter(level_2 == "Movies Lovers") %>% 
+    filter(level_3 %in% c(asian_language, european_language, Others_language)) %>% 
+    group_by(user_id) %>% 
+    summarise(MVFlang_width = n())  
+  
+#genre TV Fans
+psychographics_tv_gen <- psychographics_recode %>% 
+  filter(level_2 == "TV Lovers") %>% 
+  filter(!level_3 %in% c(asian_language, european_language, Others_language)) %>%   
+  group_by(user_id) %>% 
+  summarise(TVFgenre_width = n()) 
+
+# language TV Fans
+psychographics_tv_lang <- psychographics_recode %>% 
+  filter(level_2 == "TV Lovers") %>% 
+  filter(level_3 %in% c(asian_language, european_language, Others_language)) %>% 
+  group_by(user_id) %>% 
+  summarise(TVFlang_width = n())  
+
+
+# iflix viewing behaviour  (unique view_behaviour for each user_id.)
+
+psychographics_vb <- psychographics %>% 
+  filter(level_2 == "iflix Viewing Behaviour") %>% 
+  select(user_id, level_3) %>% 
+  rename(view_behaviour = level_3) %>% 
+  arrange(user_id)
+
+# Mobile enthusiasts 
+
+psychographics_me <- psychographics %>% 
+  filter(level_2 == "Mobile Enthusiasts") %>% 
+  select(user_id, level_3) %>%
+  mutate(DataUse_beh = ifelse(level_3=="Downloaders",1,2)) %>% 
+  group_by(user_id) %>% 
+  summarise(DataUse_beh = sum(DataUse_beh))
+# 1- Downloaders; 2- High Data Users;  3- Downloaders and High Data Users
+
+# Travellers
+
+psychographics_trv <- psychographics %>% 
+  filter(level_2 == "Travellers") %>%  
+  select(user_id, level_3) %>% 
+  mutate(MobilityType = ifelse(level_3=="Local Commuters",1,2)) %>% 
+  group_by(user_id) %>% 
+  summarise(MobilityType=sum(MobilityType))
+# 1- Local Commuters; 2- International Travellers;  3- Local Commuters and International Travellers
+  
+
+# Merging all sub-datasets in psychographics dataset
+psychographics_merged <- psychographics %>%
+      select(user_id) %>% 
+      unique() %>% 
+      arrange(user_id) %>% 
+      inner_join(psychographics_vb, by = "user_id") %>%            # Viewing behaviour dataset
+      inner_join(psychographics_me, by = "user_id") %>%            # Mobile enthusiast dataset
+      inner_join(psychographics_trv, by = "user_id") %>%           # Travellers dataset
+      inner_join(psychographics_mv_gen, by = "user_id") %>%        # Movie Lovers (genre)
+      inner_join(psychographics_mv_lang, by = "user_id") %>%       # Movie Lovers (language)
+      inner_join(psychographics_tv_gen, by = "user_id") %>%        # TV Lovers (genre)
+      inner_join(psychographics_tv_lang, by = "user_id")          # TV Lovers (language)
+         
+# DATA C: MERGED PSYCHOGRAPHIC DATASET 
+glimpse(psychographics_merged)
+```
+
+Once all the individual datasets (`demographics`, `assets`, `psychographics`) have been nicely tidied up and transformed, we merged them all together, and prepare the variables into a form suitable for modelling and visualisation.
+
+```{r}
+stream <- assetplay_merged %>% 
+  inner_join(demographics_clean_wide_ctry, by = "user_id") %>% 
+  inner_join(psychographics_merged, by = "user_id") %>% 
+
+  mutate(MVFgenre_width = as.numeric(MVFgenre_width),
+         MVFlang_width  = as.numeric(MVFlang_width),
+         TVFgenre_width = as.numeric(TVFgenre_width),
+         TVFlang_width = as.numeric(TVFlang_width),
+         genre_width = as.numeric(genre_width),
+         lang_width = as.numeric(lang_width),
+         Male = ifelse(Gender == "Male", 1, 0),
+         Income_f = ifelse(Income == "High", 3, 
+                           ifelse(Income == "Medium", 2, 1)),
+         Age_f = ifelse(Age == "55+", 6, 
+                        ifelse(Age == "45 - 54", 5 ,
+                               ifelse(Age == "35 - 44", 4 ,
+                                      ifelse(Age == "25 - 34", 3 ,
+                                             ifelse(Age == "18 - 24", 2 , 1))))),
+         android = ifelse(platform2 == "android", 1, 0),
+         viewBeh_f = ifelse(view_behaviour == "casual", 1,
+                            ifelse(view_behaviour == "player", 2, 3)), 
+         showPref_f = ifelse(show_type_behaviour == "Movie_watcher", 1,
+                              ifelse(show_type_behaviour == "TV_watcher", 2, 3)),
+         region_f = ifelse(region == "East Asia & Pacific", 1, 0)
+      )
+
+# FINAL MERGED DATASET  (1,560 user_ids)
+glimpse(stream)
+```
+
+Here is a summary of the variables used for all models in our report:
+
+**Demographic variables**
+
+1.  geographical location *(region_f)*, 
+2.  age *(Age_f)*, 
+3.  income level *(Income_f)*, and 
+4.  gender *(Male)* 
+
+
+**Show-watching pattern variables**
+
+5.  total number of shows watched *(total_shows)*, 
+6.  level of variety of genres watched *(genre_width)*, and 
+7.  level of variety of languages for the shows watched *(lang_width)*
+
+
+**Psychographic variables**
+
+8.  level of viewing *(viewBeh_f)*: 1 = casual; 2 = player; 3 = addict,
+9.  level of consumption of data *(DataUse_beh)*: 1 = downloader; 2 = high-data user; 3 = both*
+10.  level of variety of genres watched as a Movie/ TV Fan *(MVFgenre_width / TVFgenre_width)* 
+11.  level of variety of languages for the shows watched as a Movie/TV Fan *(MVFlang_width / TVFlang_width)*
+
+
+## Visualize our data (Descriptive Statistics)
+
+We first take a bird's eye view of our data- distribution of users by Age, Gender, Income and Geographical Region
+
+```{r barcharts}
+f1_1 <- stream %>%  group_by(Age) %>% summarise(n = n(), percent = n/nrow(stream)) %>% 
+  ggplot(aes(x=Age, y=percent)) + 
+  geom_bar(stat="identity", width=.5, fill="orchid4") + 
+  labs(x = "Age Groups of Users",
+       title="Age range of users", 
+       subtitle="Most Users are 34 Years or younger") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = seq(0, 0.5, 0.1)) +
+  theme(axis.title.y = element_blank())
+  
+f2_1 <- stream %>%  group_by(Gender) %>% summarise(n = n(), percent = n/nrow(stream)) %>% 
+  ggplot(aes(x=Gender, y=percent)) + 
+  geom_bar(stat="identity", width=.5, fill="deepskyblue4") + 
+  labs(title="Gender of Users", 
+       subtitle="More Female than Male Users") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = seq(0, 0.6, 0.1)) +
+  theme(axis.title.y = element_blank()) 
+
+f3_1 <- stream %>%  group_by(Income_f) %>% summarise(n = n(), percent = n/nrow(stream)) %>% 
+  ggplot(aes(x=as.factor(Income_f), y=percent)) + 
+  geom_bar(stat="identity", width=.5, fill="springgreen4", ) + 
+  labs(x = "Income Level",
+       title="Income Range of Users", 
+       subtitle= "Most Users are Low- or Medium- Income Earners") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("1" = "Low", "2" = "Medium", "3" = "High")) +
+  theme(axis.title.y = element_blank())
+
+f4_1 <- stream %>%  group_by(region_f) %>% summarise(n = n(), percent = n/nrow(stream)) %>% 
+  ggplot(aes(x=region_f, y=percent)) + 
+  geom_bar(stat="identity", width=.5, fill="brown4") + 
+  labs(x = "Geographical regions",
+       title="Geographical Regions", 
+       subtitle="Most Users Reside in East Asia & Pacific", 
+       caption="Source: Kaggle") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme(axis.title.y = element_blank()) 
+
+gridExtra::grid.arrange(f1_1, f2_1, f3_1, f4_1, nrow = 2)
+```
+
+Next, we did a plot of the users by Age and Income - it appears that younger and lower income people watch more movies and TV shows than older and higher income people.
+
+```{r stacked barcharts}
+# Age & Income of Movie & TVs Watchers
+f1_2 <- stream %>%  group_by(Age, Income_f, Gender) %>% summarise(Movies_watched = sum(Movies)) %>% 
+  ggplot(aes(x=as.factor(Income_f), y=Movies_watched)) + 
+  geom_bar(stat="identity", width=.5, aes(fill = Gender)) + 
+  facet_grid(.~Age) +
+  labs(x = "Income Level",
+       y = "Number of Movies Watched",
+       title="Who Watch More Movies?", 
+       subtitle="Younger and lower income people watch more movies than older and higher income people") +
+  scale_x_discrete(labels = c("1" = "Low", "2" = "Medium", "3" = "High")) +
+  theme(legend.title = element_blank())
+
+f2_2 <- stream %>%  group_by(Age, Income_f, Gender) %>% summarise(TV_watched = sum(TV)) %>% 
+  ggplot(aes(x=as.factor(Income_f), y=TV_watched)) + 
+  geom_bar(stat="identity", width=.5, aes(fill = Gender)) + 
+  facet_grid(.~Age) +
+  labs(x = "Income Level",
+       y = "Number of TVs Watched",
+       title="Who Watch More TVs?", 
+       subtitle="Younger and lower income people watch more TV shows than older and higher income people", 
+       caption="source: kaggle") +
+  scale_x_discrete(labels = c("1" = "Low", "2" = "Medium", "3" = "High")) +
+  theme(legend.title = element_blank())
+
+gridExtra::grid.arrange(f1_2, f2_2, nrow = 2)
+```
+
+We also did boxplots to compare the average View-Completion  within Age, Gender, Income Groups and Regions.
+```{r boxplots}
+f1_3 <- stream %>% 
+  ggplot(aes(x=as.factor(Age_f), y=viewcompletion_mean, group = as.factor(Age_f))) +
+  geom_boxplot(aes(fill = as.factor(Age_f))) +
+  labs(x = "Age Groups of Users",
+         y = "Average View-Completion Rate",
+         title="Average View-completion by Age Groups", 
+         subtitle="Younger users have slightly better(higher) view-completion rates than older users") +
+  scale_x_discrete(labels = c("1"= "< 18", "2"= "18 - 24", 
+                              "3"= "25 - 34", "4" = "35 - 44", "5" = "45 - 54", "6" = "55+")) +
+  theme(legend.position = "none")
+
+f2_3 <- stream %>%  
+  ggplot(aes(x=Gender, y=viewcompletion_mean)) + 
+  geom_boxplot(aes(fill = Gender)) +
+  scale_fill_manual(values = c("deeppink", "cadetblue1"))+
+  labs(y = "Average View-Completion Rate",
+       title="Average View-Completion by Gender", 
+       subtitle="No much differences in the average view-completion rates between both genders") +
+  theme(legend.position = "none")
+
+f3_3 <- stream %>% 
+  ggplot(aes(x=as.factor(Income_f), y=viewcompletion_mean/100)) + 
+  geom_boxplot(aes(fill = as.factor(Income_f))) +
+  scale_fill_manual(values = c("dimgrey", "darkolivegreen1", "gold")) +
+  labs(x = "Income Level",
+       y = "Average View-Completion Rate",
+       title="Average View-Completion by Income", 
+       subtitle="High-income earners have slightly better view-completion rates \nthan lower-income earners") + 
+  scale_x_discrete(labels = c("1" = "Low", "2" = "Medium", "3" = "High")) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme(legend.position = "none")
+
+f4_3 <- stream %>%  
+  ggplot(aes(x=as.factor(region_f), y=viewcompletion_mean/100)) + 
+  geom_boxplot(aes(fill= as.factor(region_f))) +
+  scale_fill_manual(values = c("cyan2", "khaki4")) +
+  labs(x = "Geographic Regions",
+       y = "Average View-Completion Rate",
+       title="Average View-Completion by Region", 
+       subtitle="Users in East-Asia & Pacific region have slightly higher view-completion rates \ncompared to those outside of the region") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("0" = "ex. East Asia & Pacific", "1" = "East Asia & Pacific"))+
+  theme(legend.position = "none")
+
+gridExtra::grid.arrange(f1_3, f2_3, f3_3, f4_3, nrow = 2)
+```
+
+Finally, we performed a lollipop plot to compare average View-Completion between Age, Gender, Income groups for Movie and/or TV Watchers.
+```{r lollipop plots}
+watchertype <- as_labeller(c("TV_watcher" = "TV Watcher", "Movie_watcher" = "Movie Watcher", 
+                             "Movie_TV_watcher" = "Movie & TV Watcher"))
+
+f1_4 <- stream %>%  group_by(show_type_behaviour, Income_f) %>% summarise(viewcompletion_mean = mean(viewcompletion_mean)) %>% 
+  ggplot(aes(x=as.factor(Income_f), y=viewcompletion_mean, label=round(viewcompletion_mean,1))) + 
+  geom_point(stat='identity', aes(color = as.factor(Income_f)), size=6, show.legend=F)  +
+  geom_segment(aes(y = 0, 
+                   x = as.factor(Income_f), 
+                   yend = viewcompletion_mean, 
+                   xend = as.factor(Income_f)), 
+               color = "black") +
+  geom_text(color="black", size=2) +
+  geom_hline(aes(yintercept = median(viewcompletion_mean)), linetype="dashed", color = "red", size=2) +
+  facet_grid(show_type_behaviour~., labeller = as_labeller(watchertype)) +
+  scale_x_discrete(labels = c("1" = "Low", "2" = "Medium", "3" = "High")) +
+  labs(x = "Income Level", y = "Average View-Completion Rate",
+       title="Average viewing completion by Income", 
+       subtitle="TV watchers appear to have higher \nView-Completion on average") +
+  coord_flip()
+
+f2_4 <- stream %>%  group_by(show_type_behaviour, Gender) %>% summarise(viewcompletion_mean = mean(viewcompletion_mean)) %>% 
+  ggplot(aes(x=Gender, y=viewcompletion_mean, label=round(viewcompletion_mean,1))) + 
+  geom_point(stat='identity', aes(color = Gender), size=6, show.legend=F)  +
+  geom_segment(aes(y = 0, 
+                   x = Gender, 
+                   yend = viewcompletion_mean, 
+                   xend = Gender), 
+               color = "black") +
+  geom_text(color="black", size=2) +
+  geom_hline(aes(yintercept = median(viewcompletion_mean)), linetype="dashed", color = "red", size=2) +
+  facet_grid(show_type_behaviour~., labeller = as_labeller(watchertype)) +
+  labs(x = "Gender", y = "Average View-Completion Rate",
+       title="Average viewing completion by Gender", 
+       subtitle="TV watchers appear to have higher \nView-Completion on average") +
+  coord_flip()
+
+f3_4 <- stream %>%  group_by(show_type_behaviour, Age) %>% summarise(viewcompletion_mean = mean(viewcompletion_mean)) %>% 
+  ggplot(aes(x=Age, y=viewcompletion_mean, label=round(viewcompletion_mean,1))) + 
+  geom_point(stat='identity', aes(color = Age), size=6, show.legend=F)  +
+  geom_segment(aes(y = 0, 
+                   x = Age, 
+                   yend = viewcompletion_mean, 
+                   xend = Age), 
+               color = "black") +
+  geom_text(color="black", size=2) +
+  geom_hline(aes(yintercept = median(viewcompletion_mean)), linetype="dashed", color = "red", size=2) +
+  facet_grid(show_type_behaviour~., labeller = as_labeller(watchertype)) +
+  labs(x = "Age Group", y = "Average View-Completion Rate",
+       title="Average viewing completion by Age Group", 
+       subtitle="TV watchers appear to have higher \nView-Completion on average") +
+  coord_flip()
+
+gridExtra::grid.arrange(f1_4, f2_4, f3_4, nrow = 1)
+```
+
+
+
+## Model
+
+
+We loaded the relevant libraries and carefully selected the explanatory variables (`demographic`, `movies`, and `psychographic`), that will be used in the models, and also performed some simple transformations to reduce the impact from outliers.
+
+```{r}
+library(jtools); library(huxtable); library(gvlma); library(car); library(ggstance); library(interactions); library(knitr)
+
+stream_model <- stream %>%  
+  select(user_id, 
+         # Demographic variables
+         region_f, Income_f, Age_f, Male,                                
+         # Movies variables
+         total_shows, genre_width, lang_width,             
+         # Psychographic variables 
+         viewBeh_f, DataUse_beh, MobilityType, MVFgenre_width, MVFlang_width, 
+              TVFgenre_width, TVFlang_width,    
+         # Dependent variable
+         viewcompletion_mean             
+         ) %>% 
+  mutate(viewcompletion_mean = as.integer(viewcompletion_mean),
+         total_shows_log = log(total_shows))
+
+glimpse(stream_model)
+```
+
+
+### Test OLS model
+
+We ran a test model (`testOLS_model`) based on OLS regression. This is to check whether the OLS approach is suitable for our modeling. 
+
+```{r Test OLS}
+testOLS_model <- lm(viewcompletion_mean ~ region_f + Income_f + Male + Age_f, data = stream_model)
+
+tidy(testOLS_model) %>% as_tibble()
+glance(testOLS_model)
+```
+
+
+### Assumption Check
+
+Based on the GVLMA check, it was found that two of the assumptions are not satisfied. The data did not follow a normal distribution. Hence, OLS regression modeling is unsuitable for application in this study. 
+
+```{r}
+library(gvlma)
+gvlma(testOLS_model)
+```
+
+
+### Specify GLM Model
+
+In this study, we shall use Generalized Linear Model since our data is not normally distributed. 
+
+We shall test a total of four models. 
+Through these regression models, we shall investigate how the the main domains of show-watching (demographic profiles, show-watching patterns and psychographic behaviours) can influence users' view-completion rates.
+
+The first model (`m1_mainD`) is the baseline model for this study. It includes only the demographic variables of the users in this dataset. The second model (`m2_mainDM`) includes the show-watching pattern. The third model (`m3_mainDMP`) includes the psychographic variables which defines the specific individual-level characteristics of individuals related to their show-watching behaviour. Model 3 aims to answer the first research question: possible factors affecting viewers' view-completion rate. The fourth model (`m4b_Int`) includes the interaction variables which aim to explore how specific variables may interact with one another to predict view-completion rate.
+
+
+```{r Model 1}
+m1_mainD <- glm(viewcompletion_mean ~ region_f + Income_f + Male + Age_f, data = stream_model,
+                family=poisson(link = "log"))
+
+summ(m1_mainD, scale = T, vifs = T, n.sd=2)
+kable(tidy(m1_mainD)); kable(glance(m1_mainD))
+```
+
+
+```{r Model 2}
+m2_mainDM <- glm(viewcompletion_mean ~ region_f + Income_f+ Age_f + Male + total_shows_log +
+                 genre_width + lang_width, data = stream_model, family=poisson(link = "log"))
+
+summ(m2_mainDM, scale = T, vifs = T, n.sd=2) 
+kable(tidy(m2_mainDM)); kable(glance(m2_mainDM))
+```
+
+
+```{r Model 3}
+m3_mainDMP <- glm(viewcompletion_mean ~ region_f+ Income_f+ Age_f+ Male + total_shows_log +
+                  genre_width + lang_width + viewBeh_f + DataUse_beh + MobilityType +  MVFlang_width + 
+                  TVFgenre_width + TVFlang_width, data = stream_model, family=poisson(link = "log"))
+
+summ(m3_mainDMP, scale = T, vifs = T, n.sd=2)
+kable(tidy(m3_mainDMP)); kable(glance(m3_mainDMP))
+```
+
+We test if the inclusion of the psychographic variables can increase the explanatory power of the model using the `anova` function
+```{r Comparison of Model 2 & 3}
+anova(m2_mainDM,m3_mainDMP, test="LRT")
+```
+
+```{r Model 4a_1}
+m4a_Int1 <- glm(viewcompletion_mean ~ region_f+ Income_f+ Age_f+ Male + total_shows_log +
+                    genre_width + lang_width + viewBeh_f + DataUse_beh + MobilityType +  MVFlang_width + 
+                    TVFgenre_width + TVFlang_width + total_shows_log*genre_width, data = stream_model, family=poisson(link = "log"))
+summ(m4a_Int1, scale = T, vifs = T, n.sd=2)
+```
+
+
+```{r Model 4a_2}
+m4a_Int2 <- glm(viewcompletion_mean ~ region_f+ Income_f+ Age_f+ Male + total_shows_log +
+                             genre_width + lang_width + viewBeh_f + DataUse_beh + MobilityType +  MVFlang_width + 
+                             TVFgenre_width + TVFlang_width + total_shows_log*lang_width, 
+                           data = stream_model, family=poisson(link = "log"))
+summ(m4a_Int2, scale = T, vifs = T, n.sd=2)
+```
+
+
+```{r Model 4b}
+m4b_Int <- glm(viewcompletion_mean ~ region_f+ Income_f+ Age_f+ Male + total_shows_log +
+                 genre_width + lang_width + viewBeh_f + DataUse_beh + MobilityType +  MVFlang_width + 
+                 TVFgenre_width + TVFlang_width + total_shows_log*genre_width + total_shows_log*lang_width, 
+                 data = stream_model, family=poisson(link = "log"))
+
+summ(m4b_Int, scale = T, vifs = T, n.sd=2)
+kable(tidy(m4b_Int)); kable(glance(m4b_Int))
+
+plot_summs(m4b_Int, scale = T, plot.distributions = T)
+```
+
+We test if the inclusion of the interaction variables can increase the explanatory power of the model using the `anova` function
+```{r Comparison of Main & Interaction Effect Model}
+anova(m3_mainDMP, m4b_Int,test="LRT")
+```
+
+
+```{r Summary Report of Model 1 to Model 4 results}
+export_summs(m1_mainD,m2_mainDM,m3_mainDMP, m4b_Int,
+             scale=TRUE, error_format = "(t = {statistic}, p = {p.value})",
+             digits = 4)
+```
+
+### Additional Analysis
+
+While experimenting with various models, we realise from our earlier visualisation plots that the total shows watched by a user (**total_shows**) is possibly dependent on user's demographic and psychographic variables. Therefore, we also did a little further exploration on this front and found the **total_shows**  variable to reasonably fit a Poisson distribution. We prceeded to slightly modify the three models discussed earlier and found the total shows watched to be sufficiently explained by our incremental addition of variables (`demographic`, `movies`, and `psychographic`).
+
+```{r}
+poisson_d <- dpois(x = 0:100 , lambda = mean(stream$total_shows))
+poission_d_tbl <- tibble(poisson_d)
+# Probability density plot   
+ggplot(stream, aes(x = total_shows, y=..density..)) +
+  geom_histogram(bins=20, fill="lightblue", colour = "black")+
+  geom_line(data=poission_d_tbl, aes(x=0:100, y=poisson_d),
+            size=1, color="deeppink")+
+  labs(x="Distribution of Total Shows Watched",
+       y="Probability")
+
+m1_mainD <- glm(total_shows ~ region_f + Income_f + Male + Age_f, data = stream_model,
+                family=poisson(link = "log"))
+m2_mainDM <- glm(total_shows ~ region_f + Income_f+ Age_f + Male + 
+                   genre_width + lang_width, data = stream_model, family=poisson(link = "log"))
+m3_mainDMP <- glm(total_shows ~ region_f+ Income_f+ Age_f+ Male + total_shows_log +
+                  genre_width + lang_width + viewBeh_f + DataUse_beh + MobilityType +  MVFlang_width + 
+                  TVFgenre_width + TVFlang_width, data = stream_model, family=poisson(link = "log"))
+
+export_summs(m1_mainD, m2_mainDM, m3_mainDMP, 
+             scale=TRUE, error_format = "(t = {statistic}, p = {p.value})",
+             digits = 4)
+
+anova(m1_mainD, m2_mainDM, m3_mainDMP, test="LRT")
+```
+
+
+
+
+## Visualize Interaction Plots
+
+The regression analyses (Model 4) shows that both interaction terms (total show X genre width & total show X lang_width is statistically significant). We shall now probe and then visualize these two interaction effects.
+
+
+### Probe Interactions (total shows X genre width)
+
+**Simple slope and spotlight analysis**
+
+```{r Int1: Simple slope and spotlight analysis}
+sim_slopes(m4a_Int1,
+           pred = total_shows_log,
+           modx = genre_width,
+           johnson_neyman = F)
+
+sim_slopes(m4a_Int1,
+           pred = genre_width,
+           modx = total_shows_log,
+           johnson_neyman = T)
+```
+
+**Interaction plot**
+
+The following figure represents the three lines that represent differing genre width levels set at `Concentrated (M-1SD)`, `Average genre width (M)`, `Broad (M+1SD)`, as noted above, and how differing levels of individuals' genre width make differences to relationships between total shows watched and view-completion rates.
+```{r Interaction plot: total show X genre width}
+interact_plot(m4a_Int1, 
+              pred = total_shows_log, 
+              modx = genre_width, 
+              modx.labels = c("Concentrated (M-1SD)",  
+                             "Average genre width (M)", 
+                              "Broad (M+1SD)"),  
+              interval = T, 
+              int.width = 0.95, 
+              colors = c("tomato3", "dodgerblue3"), 
+              vary.lty = T, 
+              line.thickness = 1,   
+              legend.main = "Genre width") +
+    labs(x = "Total number of shows watched (Log-transformed)",
+     y = "View-Completion Rate",
+     title = "The Moderation of the Relationship between Total Shows watched and View-Completion Rates",
+     subtitle = "Viewers' Genre Width as the Moderator",
+     caption = "Source: Kaggle (iflix dataset)") +
+  annotate("text", size = 2.5,
+           x = 1, 
+           y = 90,
+        label = "The shaded areas denote 95% confidence intervals.\nThe region of non-significance \nis in the  negative regions based on alpha at 5%") +
+  scale_y_continuous(breaks = seq(20,100,10)) +
+  scale_x_continuous(breaks = seq(0,6,1)) +
+  theme(legend.position = "top") 
+```
+
+
+### Probe Interactions (total shows X language width)
+
+**Simple slope & spotlight analysis**
+
+```{r Int2: Simple slope and spotlight analysis}
+sim_slopes(m4a_Int2,
+           pred = total_shows_log,
+           modx = lang_width,
+           johnson_neyman = F)
+
+sim_slopes(m4a_Int2,
+           pred = lang_width,
+           modx = total_shows_log,
+           johnson_neyman = T)
+```
+
+**Interaction plot**
+
+The following figure represents the three lines that represent differing genre width levels set at `Concentrated (M-1SD)`, `Average language width (M)`, `Broad (M+1SD)`, as noted above, and how differing levels of individuals' language width make differences to relationships between total shows watched and view-completion rates.
+```{r Interaction plot: total show X lang width}
+interact_plot(m4a_Int2,
+              pred = total_shows_log,
+              modx = lang_width,
+              modx.labels = c("Concentrated (M-1SD)", "Average language width (M)", "Broad (M+1SD)"),
+              interval = T, int.width = 0.95,
+              colors = c("tomato3", "dodgerblue3"),
+              vary.lty = T,
+              line.thickness = T,
+              legend.main = "Language Width") +
+  labs(x = "Total number of shows watched (Log-transformed)",
+       y = "View-Completion Rate",
+       title = "The Moderation of the Relationship between Total Shows watched and View-Completion Rates",
+       subtitle = "Viewers' Language Width as the Moderator",
+       caption = "Source: Kaggle (iflix dataset)") +
+  annotate("text", size = 2.5,
+          x = 1, 
+          y = 90,
+          label = "The shaded areas denote 95% confidence intervals.\nThe region of non-significance \n is within the red lines based on alpha at 5%") +
+  geom_vline(xintercept = 3.24, color = "red", size = 1) +
+  geom_vline(xintercept = 3.82, color = "red", size = 1) +
+  scale_y_continuous(breaks = seq(20,100,10)) +
+  scale_x_continuous(breaks = seq(0,6,1)) +
+  theme(legend.position = "top") 
+```
+
+
+## Interpretation of the Results
+
+From our data science project, we could find the following two findings:
+
+**1. Demographic, show-watching patterns, psychographic factors can influence view-completion rates**	
+
+Several factors can influence the view-completion rates of the viewers. 
+In terms of demographic factors, it was found that viewers in the East-Asia & Pacific region have a higher level of view-completion rates compared to those outside of the area. Viewers who are high-income earners have higher view-completion rates than low-income earners. Older viewers have higher view-completion rates than young viewers. The effect of gender on view-completion rate was statistically insignificant.
+
+In terms of show-watching pattern factors, the total number of shows watched is positively related to view-completion rates. However, watching a large variety of genres of shows is negatively associated with view-completion rates. On the contrary, watching a large variety of language shows is positively related to view-completion rates.  
+
+In terms of psychographic factors, it was found that the high-data consumption level in show viewing is positively related to high view-completion rates. The more data viewers consume during show-viewing, the higher their view-completion rates. High physical mobility (travelling locally or internationally or both) is also positively related to view-completion rates. The more physically mobile the viewers are, the higher their level of view-completion rates. Viewers who are the fans of a large variety of languages in both Movies and TVs shows is negatively related to their level of view-completion rates. However, being a fan of a large variety of TV genres contributes to the high level of view-completion rates.
+
+
+
+**2. The relationship between total number of shows watched and view-completion rate is moderated by viewers' genre & language widths**	
+
+The regression analyses also found two significant interaction terms. Based on the visualizations of the interaction plots in `Visualize Interaction Plots`, the following insights can be drawn:
+
+Watching a high number of shows may indicate that the viewer is an avid show-watcher and may be interested in online-streamed shows. Logically one may assume that having a high number of shows watched (and possibly having broad genre width) is positively related to ones' view-completion rates. Counterintuitively, the findings show that genre width negatively moderates the relationship between total shows watched and their view-completion rates. In other words, while watching more shows, those who have a broad genre width have a relatively lower level of view-completion rate compared to those with narrow (concentrated) genre width. A similar but smaller difference can also be observed when viewers watch less number of shows. 
+
+The relationship between the total number of shows watched and view-completion is positively moderated by language width. Contrary to the previous interaction effect, viewers who watched a high number of shows and have a broad language width (i.e., watched a wider variety of shows in different languages) have higher view-completion rates compared to those who have narrower language width. However, at a low number of shows watched, viewers with narrow language widths have a relatively higher level of view-completion rates compared to those who have broad language widths.
+
+
+
+## Implications
+
+View-completion rates of shows serve as a gauge of viewers' willingness to commit a certain amount of time and attention towards completing the viewing of a show. Completion of a show is also reflective of viewers' level of interest/ enjoyment towards the shows streamed by the providers. 
+
+The complication, however, is when viewers do not finish their shows. There can be a multitude of reasons for not completing a show. These reasons can be non-related to viewers' interest/ enjoyment of their shows. Examples of incidental reasons include poor Wi-Fi connections, the lack of time, or due to work commitments. 
+
+While these reasons can either be self-reported by viewers or identifiable through feedback/survey, this study point towards more inherent reasons that can arise at the individual level. Specifically, in addition to the demographic profiles of viewers, this study contends that show-watching patterns and psychographic patterns of the viewers can directly contribute to whether they finish the show. The findings in this study can value-add to online show-streaming providers who seek to understand why their subscribed viewers did not finish their streamed shows. Nothwithstanding the possible incidental reasons from viewers' feedback/ survey, providers can take into consideration more individual-level/ enduring factors affecting their view-completion rates.
+
+
+
+
+## Limitations and Future Directions
+
+This study is not without limitations. First, the concept of view-completion is broad and complicated. This study implicitly assumed that the completion of a show indicates that the viewer had given full/ undivided attention to the show from start till finish. In reality, however, a view-completion of the show may imply otherwise. For example, a 'viewer' may let an interesting or boring show run but turn towards other commitments (e.g., attend to calls or to cries of a baby). Second, although we had found three broad categories of predictors of view-completion, we cannot guarantee that the influence is limited to these categories. There is a potential that the influence may traverse beyond these categories or may interact among one another to influence view-completion. 
+
+Finally, we found that the total shows watched by a user (**total_shows**) can potentially become a dependent variable, as per what we discussed under `Additional Analysis` section.  The total shows watched by a user appear to be also sufficiently explained by our incremental addition of variables (`demographic`, `movies`, and `psychographic`) in the three models discussed earlier. We are both excited and confused by such a notion that an explanatory variable can potentially become a dependent variable, and feel more work should be done in this area. We propose to investigate (in future research) whether the total shows watched by a user (**total_shows**) is an explanatory or dependent variable. Show providers may also be interested in finding out what really attracts users to watch more shows, whether movies or TV shows.
+
+
+
+## Contribution Statement
+
+Both Zhang Hao and Yoman have worked together closely in a collaborative fashion over this period, and contributed accordingly, in accordance with their individual strengths and prior experiences. Zhang Hao provided the broad framework and direction of the research project, and brings along valuable experience in doing academic/ communication research in his field of work; Yoman contributed significantly to the coding effort (especially in data wrangling) from his prior database programming experience. In terms of modelling and visualisation, there was good sharing of workload amongst both persons, with cross-fertilisation of ideas and experimentation of various models along the way, not all of which are successful, as we would reasonably expect in any kind of field research. Zhang Hao is clearly more well-versed with improving the aesthetic appeal of the ggplots and added significant value on that front. Finally, Zhang Hao also contributed significantly to the interpretation of regression results. The RMarkdown document was prepared together, where each person assists with copying and pasting respective sections from original source file.
